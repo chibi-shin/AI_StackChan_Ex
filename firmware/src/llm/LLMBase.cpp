@@ -22,8 +22,9 @@ SpiRamJsonDocument chat_doc(0);     // PSRAMから確保するように変更。
 LLMBase::LLMBase(llm_param_t param, int _promptMaxSize)
   : param(param), promptMaxSize(_promptMaxSize), isOfflineService(false) 
 {
+  // PSRAM上に所定サイズのJsonDocumentを確保
+  // 以降、容量不足になるとArduinoJsonは値の追加に失敗し、結果としてnullが出ることがある
   chat_doc = SpiRamJsonDocument(promptMaxSize);
-
 }
 
 

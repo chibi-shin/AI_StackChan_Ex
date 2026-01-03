@@ -1,10 +1,13 @@
 #include <ESP32WebServer.h>
 #include <nvs.h>
+#include <SD.h>
 #include "WebAPI.h"
 #include "Avatar.h"
 #include "llm/ChatGPT/ChatGPT.h"
 #include "llm/ChatGPT/FunctionCall.h"
 #include "Robot.h"
+#include "mod/ModManager.h"
+#include "mod/ImageExplain/ImageExplainMod.h"
 
 using namespace m5avatar;
 extern Avatar avatar;
@@ -12,6 +15,11 @@ extern uint8_t m5spk_virtual_channel;
 extern String STT_API_KEY;
 
 ESP32WebServer server(80);
+
+// 画像アップロード用のグローバル変数
+String g_uploadedImagePath = "";
+bool g_imageUploaded = false;
+String g_base64ImageBuffer = "";  // Base64エンコードされた画像データ
 
 // C++11 multiline string constants are neato...
 static const char HEAD[] PROGMEM = R"KEWL(
@@ -118,6 +126,188 @@ static const char ROLE_HTML[] PROGMEM = R"KEWL(
 //			} else {
 //				alert("Please enter some text before submitting.");
 //			}
+		}
+	</script>
+</body>
+</html>)KEWL";
+
+static const char IMAGE_UPLOAD_HTML[] PROGMEM = R"KEWL(
+<!DOCTYPE html>
+<html>
+<head>
+	<title>画像アップロード</title>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<style>
+		body {
+			font-family: Arial, sans-serif;
+			max-width: 600px;
+			margin: 50px auto;
+			padding: 20px;
+		}
+		.upload-area {
+			border: 2px dashed #ccc;
+			border-radius: 10px;
+			padding: 40px;
+			text-align: center;
+			margin: 20px 0;
+		}
+		#preview {
+			max-width: 100%;
+			max-height: 400px;
+			margin: 20px 0;
+			display: none;
+		}
+		button {
+			background-color: #4CAF50;
+			color: white;
+			padding: 15px 32px;
+			font-size: 16px;
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+			margin: 10px;
+		}
+		button:hover {
+			background-color: #45a049;
+		}
+		button:disabled {
+			background-color: #cccccc;
+			cursor: not-allowed;
+		}
+		#status {
+			margin: 20px 0;
+			padding: 10px;
+			border-radius: 4px;
+		}
+		.success {
+			background-color: #d4edda;
+			color: #155724;
+		}
+		.error {
+			background-color: #f8d7da;
+			color: #721c24;
+		}
+		.info {
+			background-color: #d1ecf1;
+			color: #0c5460;
+		}
+	</style>
+</head>
+<body>
+	<h1>🤖 スタックチャン画像説明</h1>
+	<p>画像を選択してアップロードすると、スタックチャンが説明してくれます</p>
+	
+	<div class="upload-area">
+		<input type="file" id="imageInput" accept="image/*" style="display: none;">
+		<button onclick="document.getElementById('imageInput').click()">📷 画像を選択</button>
+		<p>または、ここに画像をドロップ</p>
+	</div>
+	
+	<img id="preview" alt="プレビュー">
+	
+	<div style="text-align: center;">
+		<button id="uploadBtn" onclick="uploadImage()" disabled>🚀 アップロード</button>
+		<button onclick="clearImage()">🗑️ クリア</button>
+	</div>
+	
+	<div id="status"></div>
+	
+	<script>
+		let selectedFile = null;
+		
+		const imageInput = document.getElementById('imageInput');
+		const preview = document.getElementById('preview');
+		const uploadBtn = document.getElementById('uploadBtn');
+		const status = document.getElementById('status');
+		const uploadArea = document.querySelector('.upload-area');
+		
+		// ファイル選択時
+		imageInput.addEventListener('change', function(e) {
+			const file = e.target.files[0];
+			if (file) {
+				handleFile(file);
+			}
+		});
+		
+		// ドラッグ&ドロップ
+		uploadArea.addEventListener('dragover', function(e) {
+			e.preventDefault();
+			uploadArea.style.borderColor = '#4CAF50';
+		});
+		
+		uploadArea.addEventListener('dragleave', function(e) {
+			uploadArea.style.borderColor = '#ccc';
+		});
+		
+		uploadArea.addEventListener('drop', function(e) {
+			e.preventDefault();
+			uploadArea.style.borderColor = '#ccc';
+			const file = e.dataTransfer.files[0];
+			if (file && file.type.startsWith('image/')) {
+				handleFile(file);
+			}
+		});
+		
+		function handleFile(file) {
+			// ファイルサイズチェック（2MB以下）
+			if (file.size > 2 * 1024 * 1024) {
+				showStatus('画像サイズは2MB以下にしてください', 'error');
+				return;
+			}
+			
+			selectedFile = file;
+			
+			// プレビュー表示
+			const reader = new FileReader();
+			reader.onload = function(e) {
+				preview.src = e.target.result;
+				preview.style.display = 'block';
+				uploadBtn.disabled = false;
+				showStatus('画像を選択しました。アップロードボタンを押してください。', 'info');
+			};
+			reader.readAsDataURL(file);
+		}
+		
+		function uploadImage() {
+			if (!selectedFile) {
+				showStatus('画像を選択してください', 'error');
+				return;
+			}
+			
+			uploadBtn.disabled = true;
+			showStatus('アップロード中...', 'info');
+			
+			const formData = new FormData();
+			formData.append('image', selectedFile);
+			
+			fetch('/image_upload', {
+				method: 'POST',
+				body: formData
+			})
+			.then(response => response.text())
+			.then(data => {
+				showStatus('アップロード成功！スタックチャンが画像を説明します。', 'success');
+				uploadBtn.disabled = false;
+			})
+			.catch(error => {
+				showStatus('アップロード失敗: ' + error, 'error');
+				uploadBtn.disabled = false;
+			});
+		}
+		
+		function clearImage() {
+			selectedFile = null;
+			preview.style.display = 'none';
+			preview.src = '';
+			imageInput.value = '';
+			uploadBtn.disabled = true;
+			status.innerHTML = '';
+		}
+		
+		function showStatus(message, type) {
+			status.innerHTML = message;
+			status.className = type;
 		}
 	</script>
 </body>
@@ -279,6 +469,76 @@ void handle_role_get() {
   server.send(200, "text/html", String(HEAD) + html);
 };
 
+void handle_image_upload_page() {
+  server.send(200, "text/html", IMAGE_UPLOAD_HTML);
+}
+
+void handle_image_upload() {
+  // POST以外は拒否
+  if (server.method() != HTTP_POST) {
+    server.send(405, "text/plain", "Method Not Allowed");
+    return;
+  }
+
+  HTTPUpload& upload = server.upload();
+  static File uploadFile;
+  static String uploadPath = "/app/AiStackChanEx/uploaded_image.jpg";
+
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("Upload Start: %s\n", upload.filename.c_str());
+    
+    // SDカードの初期化確認
+    if(!SD.begin(GPIO_NUM_4, SPI, 25000000)) {
+      Serial.println("SD Card Mount Failed");
+      server.send(500, "text/plain", "SD Card Error");
+      return;
+    }
+
+    // アップロードディレクトリの作成
+    if(!SD.exists("/app/AiStackChanEx")) {
+      SD.mkdir("/app");
+      SD.mkdir("/app/AiStackChanEx");
+    }
+
+    // ファイルを開く（上書き）
+    uploadFile = SD.open(uploadPath.c_str(), FILE_WRITE);
+    if (!uploadFile) {
+      Serial.println("Failed to open file for writing");
+      server.send(500, "text/plain", "File Open Error");
+      return;
+    }
+  } 
+  else if (upload.status == UPLOAD_FILE_WRITE) {
+    // データを書き込む
+    if (uploadFile) {
+      uploadFile.write(upload.buf, upload.currentSize);
+      Serial.printf("Writing: %d bytes\n", upload.currentSize);
+    }
+  } 
+  else if (upload.status == UPLOAD_FILE_END) {
+    if (uploadFile) {
+      uploadFile.close();
+      Serial.printf("Upload Complete: %d bytes\n", upload.totalSize);
+      
+      // グローバル変数に画像パスを保存
+      g_uploadedImagePath = uploadPath;
+      g_imageUploaded = true;
+      
+      server.send(200, "text/plain", "OK - Image uploaded successfully");
+      Serial.println("Image uploaded: " + uploadPath);
+    } else {
+      server.send(500, "text/plain", "Upload Error");
+    }
+  }
+  else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (uploadFile) {
+      uploadFile.close();
+    }
+    Serial.println("Upload Aborted");
+    server.send(500, "text/plain", "Upload Aborted");
+  }
+}
+
 void handle_face() {
   String expression = server.arg("expression");
   expression = expression + "\n";
@@ -354,6 +614,8 @@ void init_web_server(void)
   server.on("/role", handle_role);
   server.on("/role_set", HTTP_POST, handle_role_set);
   server.on("/role_get", handle_role_get);
+  server.on("/image_upload_page", handle_image_upload_page);
+  server.on("/image_upload", HTTP_POST, handle_image_upload, handle_image_upload);
   server.onNotFound(handleNotFound);
 
   server.begin();

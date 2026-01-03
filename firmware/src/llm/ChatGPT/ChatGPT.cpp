@@ -16,6 +16,244 @@
 using namespace m5avatar;
 extern Avatar avatar;
 
+// バッファリング+フロー制御を行うストリーミング送信クラス
+// 原理: TLS送信は内部バッファ→wifiタスク(CPU0)で非同期実行されるため、
+// 送信側はavailableForWrite()で空き容量を監視し、満杯時は待機してwifiタスクに処理時間を譲る。
+class BufferedStreamingPrint : public Print {
+public:
+  explicit BufferedStreamingPrint(Client& client, size_t bufSize = 512, size_t minAvailable = 256)
+    : client_(client), bufSize_(bufSize), minAvailable_(minAvailable), bufPos_(0)
+  {
+    buffer_ = (uint8_t*)malloc(bufSize_);
+    if (!buffer_) {
+      Serial.println("[BufferedStreamingPrint] malloc failed");
+      bufSize_ = 0;
+    }
+  }
+
+  ~BufferedStreamingPrint() {
+    flush();
+    if (buffer_) {
+      free(buffer_);
+    }
+  }
+
+  size_t write(uint8_t b) override {
+    if (!buffer_ || bufSize_ == 0) {
+      return 0;
+    }
+    buffer_[bufPos_++] = b;
+    if (bufPos_ >= bufSize_) {
+      flush();
+    }
+    return 1;
+  }
+
+  size_t write(const uint8_t* data, size_t size) override {
+    if (!buffer_ || bufSize_ == 0) {
+      return 0;
+    }
+    size_t written = 0;
+    while (written < size) {
+      size_t chunk = size - written;
+      size_t available = bufSize_ - bufPos_;
+      if (chunk > available) {
+        chunk = available;
+      }
+      memcpy(buffer_ + bufPos_, data + written, chunk);
+      bufPos_ += chunk;
+      written += chunk;
+      if (bufPos_ >= bufSize_) {
+        flush();
+      }
+    }
+    return written;
+  }
+
+  void flush() {
+    if (bufPos_ == 0) {
+      return;
+    }
+
+    size_t pos = 0;
+    int stallCount = 0;
+    const int MAX_STALL = 10000; // 10秒タイムアウト（1ms * 10000）
+
+    while (pos < bufPos_) {
+      // 単純に書き込み、内部でブロッキング処理される
+      // availableForWrite()は期待通り動作しないケースがあるため使わない
+      size_t toSend = bufPos_ - pos;
+      // 一度に送信するサイズを制限（大きすぎるとバッファ詰まりを起こす）
+      if (toSend > 512) {
+        toSend = 512;
+      }
+
+      size_t sent = client_.write(buffer_ + pos, toSend);
+      
+      if (sent == 0) {
+        // 送信できなかった場合は短時間待機
+        delay(1);
+        stallCount++;
+        if (stallCount >= MAX_STALL) {
+          Serial.printf("[BufferedStreamingPrint] Timeout after %d retries (sent %u/%u bytes)\n", 
+                        stallCount, (unsigned)pos, (unsigned)bufPos_);
+          break;
+        }
+        continue;
+      }
+
+      stallCount = 0; // 送信成功したらカウンタリセット
+      pos += sent;
+      totalSent_ += sent;
+
+      // 送信進捗表示（約50KB毎に変更）
+      if (totalSent_ / 50000 > lastReportedChunk_) {
+        lastReportedChunk_ = totalSent_ / 50000;
+        Serial.printf("[Streaming] %u KB sent\n", (unsigned)(totalSent_ / 1000));
+      }
+
+      // wifiタスクに定期的に処理時間を譲る（重要）
+      if (sent > 0 && pos % 512 == 0) {
+        delay(1); // 512バイト毎に1ms待機
+      }
+    }
+
+    bufPos_ = 0;
+  }
+
+private:
+  Client& client_;
+  uint8_t* buffer_;
+  size_t bufSize_;
+  size_t minAvailable_;
+  size_t bufPos_;
+  size_t totalSent_ = 0;
+  size_t lastReportedChunk_ = 0;
+};
+
+
+static bool parse_https_url(const char* url, String& host, uint16_t& port, String& path) {
+  host = "";
+  path = "/";
+  port = 443;
+
+  String u(url);
+  if (!u.startsWith("https://")) {
+    return false;
+  }
+
+  int hostStart = 8;
+  int pathStart = u.indexOf('/', hostStart);
+  if (pathStart < 0) {
+    host = u.substring(hostStart);
+    path = "/";
+  } else {
+    host = u.substring(hostStart, pathStart);
+    path = u.substring(pathStart);
+  }
+
+  int colon = host.indexOf(':');
+  if (colon > 0) {
+    port = (uint16_t)host.substring(colon + 1).toInt();
+    host = host.substring(0, colon);
+  }
+
+  return host.length() > 0;
+}
+
+String ChatGPT::https_post_json(const char* url, const JsonDocument& doc, const char* root_ca) {
+  String payload = "";
+
+  String host, path;
+  uint16_t port = 443;
+  if (!parse_https_url(url, host, port, path)) {
+    Serial.println("[HTTPS] Invalid URL");
+    return payload;
+  }
+
+  WiFiClientSecure* client = new WiFiClientSecure;
+  if (!client) {
+    Serial.println("Unable to create client");
+    return payload;
+  }
+
+  client->setCACert(root_ca);
+  client->setTimeout(65000);
+
+  Serial.print("[HTTPS] begin...\n");
+  if (!client->connect(host.c_str(), port)) {
+    Serial.println("[HTTPS] Unable to connect");
+    delete client;
+    return payload;
+  }
+
+  size_t contentLen = measureJson(doc);
+  Serial.printf("[HTTPS] Streaming POST: %u bytes\n", (unsigned)contentLen);
+
+  // HTTPヘッダ送信
+  client->printf("POST %s HTTP/1.1\r\n", path.c_str());
+  client->printf("Host: %s\r\n", host.c_str());
+  client->print("User-Agent: StackChanEx\r\n");
+  client->print("Accept: application/json\r\n");
+  client->print("Content-Type: application/json\r\n");
+  client->printf("Authorization: Bearer %s\r\n", param.api_key.c_str());
+  client->printf("Content-Length: %u\r\n", (unsigned)contentLen);
+  client->print("Connection: close\r\n\r\n");
+
+  // バッファリング+フロー制御付きストリーミング送信
+  // 原理: 一定サイズずつwrite()し、定期的にdelay()でwifiタスクに処理時間を譲る
+  Serial.println("[HTTPS] Starting buffered streaming transfer...");
+  unsigned long startTime = millis();
+  {
+    BufferedStreamingPrint stream(*client, 512);
+    serializeJson(doc, stream);
+    // デストラクタで自動flush
+  }
+  unsigned long elapsed = millis() - startTime;
+  Serial.printf("[HTTPS] Transfer complete (%lu ms)\n", elapsed);
+
+  // レスポンスが届くまで少し待機
+  delay(50);
+
+  // HTTPレスポンスの読み取り
+  String statusLine = "";
+  unsigned long waitStart = millis();
+  while (statusLine.length() == 0 && millis() - waitStart < 5000) {
+    if (client->available()) {
+      statusLine = client->readStringUntil('\n');
+      statusLine.trim();
+    } else {
+      delay(10);
+    }
+  }
+
+  int httpCode = 0;
+  if (statusLine.startsWith("HTTP/")) {
+    int firstSpace = statusLine.indexOf(' ');
+    if (firstSpace > 0 && statusLine.length() >= firstSpace + 4) {
+      httpCode = statusLine.substring(firstSpace + 1, firstSpace + 4).toInt();
+    }
+  }
+  Serial.printf("[HTTPS] Response code: %d\n", httpCode);
+
+  // ヘッダー読み飛ばし（空行まで）
+  while (client->connected() || client->available()) {
+    String line = client->readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) {
+      break; // 空行を検出したらヘッダー終了
+    }
+    delay(0);
+  }
+
+  // ボディのみ読み取り
+  payload = client->readString();
+
+  client->stop();
+  delete client;
+  return payload;
+}
+
 
 String json_ChatString = 
 "{\"model\": \"gpt-4o\","
@@ -165,59 +403,18 @@ void ChatGPT::load_role(){
 }
 
 
-String ChatGPT::https_post_json(const char* url, const char* json_string, const char* root_ca) {
-  String payload = "";
-  WiFiClientSecure *client = new WiFiClientSecure;
-  if(client) {
-    client -> setCACert(root_ca);
-    {
-      // Add a scoping block for HTTPClient https to make sure it is destroyed before WiFiClientSecure *client is 
-      HTTPClient https;
-      https.setTimeout( 65000 ); 
-  
-      Serial.print("[HTTPS] begin...\n");
-      if (https.begin(*client, url)) {  // HTTPS
-        Serial.print("[HTTPS] POST...\n");
-        // start connection and send HTTP header
-        https.addHeader("Content-Type", "application/json");
-        https.addHeader("Authorization", String("Bearer ") + param.api_key);
-        int httpCode = https.POST((uint8_t *)json_string, strlen(json_string));
-  
-        // httpCode will be negative on error
-        if (httpCode > 0) {
-          // HTTP header has been send and Server response header has been handled
-          Serial.printf("[HTTPS] POST... code: %d\n", httpCode);
-  
-          // file found at server
-          if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
-            payload = https.getString();
-            Serial.println("//////////////");
-            Serial.println(payload);
-            Serial.println("//////////////");
-          }
-        } else {
-          Serial.printf("[HTTPS] POST... failed, error: %s\n", https.errorToString(httpCode).c_str());
-        }  
-        https.end();
-      } else {
-        Serial.printf("[HTTPS] Unable to connect\n");
-      }
-      // End extra scoping block
-    }  
-    delete client;
-  } else {
-    Serial.println("Unable to create client");
-  }
-  return payload;
-}
-
-
 #define MAX_REQUEST_COUNT  (10)
 void ChatGPT::chat(String text, const char *base64_buf) {
   static String response = "";
   String calledFunc = "";
   //String funcCallMode = "auto";
   bool image_flag = false;
+  
+  // 画像URL文字列をchat()関数のスコープで保持（forループ内で作成すると、serializeJson時に無効になる）
+  String image_url_str = "";
+  if(base64_buf != NULL){
+    image_url_str = String("data:image/jpeg;base64,") + String(base64_buf);
+  }
 
   //Serial.println(InitBuffer);
   //init_chat_doc(InitBuffer.c_str());
@@ -245,6 +442,11 @@ void ChatGPT::chat(String text, const char *base64_buf) {
       JsonArray messages = chat_doc["messages"];
       JsonObject systemMessage1 = messages.createNestedObject();
 
+      if (systemMessage1.isNull()) {
+        Serial.println("[ChatGPT] ERROR: createNestedObject() failed (out of memory?)");
+        break;
+      }
+
       if(chatHistory.get_role(i).equals(String("function"))){
         //Function Callingの場合
         systemMessage1["role"] = chatHistory.get_role(i);
@@ -261,15 +463,14 @@ void ChatGPT::chat(String text, const char *base64_buf) {
         //      ]}
         //  ],
 
-        String image_url_str = String("data:image/jpeg;base64,") + String(base64_buf); 
-
         systemMessage1["role"] = chatHistory.get_role(i);
         JsonObject content_text = systemMessage1["content"].createNestedObject();
         content_text["type"] = "text";
         content_text["text"] = chatHistory.get_content(i);
         JsonObject content_image = systemMessage1["content"].createNestedObject();
         content_image["type"] = "image_url";
-        content_image["image_url"]["url"] = image_url_str.c_str();
+        // image_url_strは関数スコープで定義されているため、serializeJson()時も有効
+        content_image["image_url"]["url"] = image_url_str;
 
         //次回以降は画像の埋め込みをしないよう、識別用の文字列"image"を消す
         chatHistory.set_funcName(i, "");
@@ -281,15 +482,28 @@ void ChatGPT::chat(String text, const char *base64_buf) {
 
     }
 
-    String json_string;
-    serializeJson(chat_doc, json_string);
+    if (chat_doc.overflowed()) {
+      Serial.printf("[ChatGPT] WARNING: chat_doc overflowed. capacity=%u, measured=%u\n",
+                    (unsigned)chat_doc.capacity(), (unsigned)measureJson(chat_doc));
+    }
 
-    //serializeJsonPretty(chat_doc, json_string);
+    // 巨大JSONはString化せず、必要な情報だけ表示
     Serial.println("====================");
-    Serial.println(json_string);
-    Serial.println("====================");
+      Serial.printf("[ChatGPT] doc.measured=%u, doc.capacity=%u, overflowed=%d\n",
+              (unsigned)measureJson(chat_doc), (unsigned)chat_doc.capacity(), (int)chat_doc.overflowed());
+      // urlフィールドの存在確認（nullならここで確定）
+      const char* url = chat_doc["messages"][1]["content"][1]["image_url"]["url"];
+      if (!url) {
+          Serial.println("[ChatGPT] image_url.url is NULL in document");
+        } else {
+          Serial.printf("[ChatGPT] image_url.url len=%u\n", (unsigned)strlen(url));
+          if (strncmp(url, "data:image/", 11) != 0) {
+            Serial.println("[ChatGPT] WARNING: image_url.url does not start with data:image/");
+          }
+      }
+      Serial.println("====================");
 
-    response = execChatGpt(json_string, calledFunc);
+      response = execChatGpt(calledFunc);
 
 
     if(calledFunc == ""){   // Function Callなし ／ Function Call繰り返しの完了
@@ -308,12 +522,12 @@ void ChatGPT::chat(String text, const char *base64_buf) {
 }
 
 
-String ChatGPT::execChatGpt(String json_string, String& calledFunc) {
+String ChatGPT::execChatGpt(String& calledFunc) {
   String response = "";
   avatar.setExpression(Expression::Doubt);
   avatar.setSpeechFont(&fonts::efontJA_16);
   avatar.setSpeechText("考え中…");
-  String ret = https_post_json("https://api.openai.com/v1/chat/completions", json_string.c_str(), root_ca_openai);
+  String ret = https_post_json("https://api.openai.com/v1/chat/completions", chat_doc, root_ca_openai);
   avatar.setExpression(Expression::Neutral);
   avatar.setSpeechText("");
   Serial.println(ret);
@@ -330,6 +544,20 @@ String ChatGPT::execChatGpt(String json_string, String& calledFunc) {
       avatar.setSpeechText("");
       avatar.setExpression(Expression::Neutral);
     }else{
+      // OpenAI errorレスポンス
+      const char* errMsg = doc["error"]["message"]; 
+      if (errMsg && errMsg[0] != '\0') {
+        Serial.println(errMsg);
+        avatar.setExpression(Expression::Sad);
+        avatar.setSpeechText("エラーです");
+        response = "エラーです";
+        delay(1000);
+        avatar.setSpeechText("");
+        avatar.setExpression(Expression::Neutral);
+        calledFunc = String("");
+        return response;
+      }
+
       const char* data = doc["choices"][0]["message"]["content"];
       
       // content = nullならfunction call

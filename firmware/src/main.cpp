@@ -16,6 +16,7 @@
 #include "mod/PhotoFrame/PhotoFrameMod.h"
 #include "mod/StatusMonitor/StatusMonitorMod.h"
 #include "mod/VolumeSetting/VolumeSettingMod.h"
+#include "mod/ImageExplain/ImageExplainMod.h"
 
 #include "driver/PlayMP3.h"   //lipSync
 
@@ -241,6 +242,7 @@ ModBase* init_mod(void)
     add_mod(new AiStackChanMod(isOffline));
 #endif
   }
+  add_mod(new ImageExplainMod(isOffline));
   //add_mod(new PomodoroMod(isOffline));
   //add_mod(new PhotoFrameMod(isOffline));
   add_mod(new StatusMonitorMod());

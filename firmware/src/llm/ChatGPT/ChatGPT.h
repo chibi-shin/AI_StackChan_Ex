@@ -9,7 +9,8 @@
 #include "../LLMBase.h"
 #include "MCPClient.h"
 
-#define CHATGPT_PROMPT_MAX_SIZE   (1024*50)
+// 画像対応のため、バッファサイズを拡大（Base64エンコード後の画像は500KB程度になる）
+#define CHATGPT_PROMPT_MAX_SIZE   (1024*1024)  // 1MB
 
 extern String InitBuffer;
 extern String json_ChatString;
@@ -23,9 +24,9 @@ public:  //本当はprivateにしたいところだがコールバック関数�
 public:
     ChatGPT(llm_param_t param, int _promptMaxSize = CHATGPT_PROMPT_MAX_SIZE);
     virtual void chat(String text, const char *base64_buf = NULL);
-    String execChatGpt(String json_string, String& calledFunc);
+    String execChatGpt(String& calledFunc);
     String exec_calledFunc(const char* name, const char* args);
-    String https_post_json(const char* url, const char* json_string, const char* root_ca);
+    String https_post_json(const char* url, const JsonDocument& doc, const char* root_ca);
     
     virtual bool init_chat_doc(const char *data);
     virtual bool save_role();

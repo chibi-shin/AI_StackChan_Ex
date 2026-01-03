@@ -1,5 +1,13 @@
 {
-	"folders": [],
+	"folders": [
+		{
+			"name": "firmware",
+			"path": "."
+		},
+		{
+			"path": ".."
+		}
+	],
 	"settings": {
 		"files.associations": {
 			"string": "cpp",
