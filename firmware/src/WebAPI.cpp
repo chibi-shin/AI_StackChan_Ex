@@ -20,6 +20,7 @@ ESP32WebServer server(80);
 String g_uploadedImagePath = "";
 bool g_imageUploaded = false;
 String g_base64ImageBuffer = "";  // Base64エンコードされた画像データ
+String g_imageQuestion = "";     // 画像に対する質問文
 
 // C++11 multiline string constants are neato...
 static const char HEAD[] PROGMEM = R"KEWL(
@@ -206,6 +207,11 @@ static const char IMAGE_UPLOAD_HTML[] PROGMEM = R"KEWL(
 	
 	<img id="preview" alt="プレビュー">
 	
+	<div style="margin: 20px 0;">
+		<label for="questionInput" style="display: block; margin-bottom: 10px; font-weight: bold;">💬 質問（オプション）:</label>
+		<textarea id="questionInput" placeholder="画像について質問がある場合は入力してください（例: この写真に写っている物は何ですか？）" style="width: 100%; height: 80px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box;"></textarea>
+	</div>
+	
 	<div style="text-align: center;">
 		<button id="uploadBtn" onclick="uploadImage()" disabled>🚀 アップロード</button>
 		<button onclick="clearImage()">🗑️ クリア</button>
@@ -281,6 +287,12 @@ static const char IMAGE_UPLOAD_HTML[] PROGMEM = R"KEWL(
 			const formData = new FormData();
 			formData.append('image', selectedFile);
 			
+			// 質問文があれば追加
+			const question = document.getElementById('questionInput').value.trim();
+			if (question) {
+				formData.append('question', question);
+			}
+			
 			fetch('/image_upload', {
 				method: 'POST',
 				body: formData
@@ -298,6 +310,7 @@ static const char IMAGE_UPLOAD_HTML[] PROGMEM = R"KEWL(
 		
 		function clearImage() {
 			selectedFile = null;
+			document.getElementById('questionInput').value = '';
 			preview.style.display = 'none';
 			preview.src = '';
 			imageInput.value = '';
@@ -519,6 +532,14 @@ void handle_image_upload() {
     if (uploadFile) {
       uploadFile.close();
       Serial.printf("Upload Complete: %d bytes\n", upload.totalSize);
+      
+      // 質問文を取得（POSTパラメータから）
+      if (server.hasArg("question")) {
+        g_imageQuestion = server.arg("question");
+        Serial.println("Question: " + g_imageQuestion);
+      } else {
+        g_imageQuestion = "";
+      }
       
       // グローバル変数に画像パスを保存
       g_uploadedImagePath = uploadPath;

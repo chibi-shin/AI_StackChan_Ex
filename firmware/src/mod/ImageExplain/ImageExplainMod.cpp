@@ -19,14 +19,16 @@ extern void sw_tone();
 extern String g_uploadedImagePath;
 extern bool g_imageUploaded;
 extern String g_base64ImageBuffer;
+extern String g_imageQuestion;
 ///////////////
 
 ImageExplainMod::ImageExplainMod(bool _isOffline)
-  : processing{false}
+  : processing{false}, conversationMode{false}
 {
   box_BtnA.setupBox(0, 100, 40, 60);
   box_BtnB.setupBox(140, 100, 40, 60);
   box_BtnC.setupBox(280, 100, 40, 60);
+  box_stt.setupBox(0, 0, M5.Display.width(), 60);  // 画面上部をタッチで音声入力
 }
 
 void ImageExplainMod::init(void)
@@ -35,10 +37,12 @@ void ImageExplainMod::init(void)
   avatar.setSpeechFont(&fonts::efontJA_12);
   delay(1000);
   avatar.setSpeechText("画像を送信してください");
+  conversationMode = false;
   Serial.println("===========================================");
   Serial.println("Image Explain Mode");
   Serial.println("Send image via web interface");
-  Serial.println("URL: http://<IP address>/image_upload");
+  Serial.println("URL: http://<IP address>/image_upload_page");
+  Serial.println("Touch screen to ask questions");
   Serial.println("===========================================");
 }
 
@@ -60,16 +64,49 @@ void ImageExplainMod::btnA_pressed(void)
 
 void ImageExplainMod::btnB_pressed(void)
 {
+  Serial.printf("btnB_pressed: conversationMode=%d, processing=%d\n", conversationMode, processing);
   sw_tone();
-  // カメラ機能がある場合はカメラ撮影も実装可能
-  avatar.setSpeechText("未実装");
+  // 音声入力で追加質問
+  if(!processing && conversationMode){
+    avatar.setExpression(Expression::Happy);
+    avatar.setSpeechText("御用でしょうか？");
+    
+    String ret = robot->listen();
+    avatar.setSpeechText("");
+    
+    Serial.println("音声認識終了");
+    if(ret != "") {
+      Serial.println("追加質問: " + ret);
+      // 画像を付けずに通常の会話として続ける
+      robot->chat(ret, NULL);
+      avatar.setSpeechText("");
+      avatar.setExpression(Expression::Neutral);
+    } else {
+      Serial.println("音声認識失敗");
+      avatar.setExpression(Expression::Sad);
+      avatar.setSpeechText("聞き取れませんでした");
+      delay(2000);
+      avatar.setSpeechText("");
+      avatar.setExpression(Expression::Neutral);
+    }
+  }
+  else if(!processing){
+    avatar.setSpeechText("画像を送信してください");
+    delay(1000);
+    avatar.setSpeechText("画像を送信してください");
+  }
 }
 
 void ImageExplainMod::btnC_pressed(void)
 {
   sw_tone();
-  // 画像履歴のクリア
+  // 画像履歴と会話履歴のクリア
   lastImagePath = "";
+  conversationMode = false;
+  // 会話履歴をクリア（LLMのchatHistory）
+  if(robot->llm != NULL){
+    robot->llm->clear_history();
+  }
   avatar.setSpeechText("履歴をクリア");
   delay(1000);
   avatar.setSpeechText("画像を送信してください");
@@ -77,7 +114,20 @@ void ImageExplainMod::btnC_pressed(void)
 
 void ImageExplainMod::display_touched(int16_t x, int16_t y)
 {
-  if (box_BtnA.contain(x, y))
+  Serial.printf("Touch detected: x=%d, y=%d, conversationMode=%d, processing=%d\n", x, y, conversationMode, processing);
+  
+  if (box_stt.contain(x, y))
+  {
+    Serial.println("Touch in STT area");
+    // 画面上部をタッチで音声入力（会話継続モード時）
+    if(conversationMode && !processing){
+      Serial.println("Starting voice input...");
+      btnB_pressed();
+    } else {
+      Serial.printf("Voice input blocked: conversationMode=%d, processing=%d\n", conversationMode, processing);
+    }
+  }
+  else if (box_BtnA.contain(x, y))
   {
     btnA_pressed();
   }
@@ -185,18 +235,32 @@ void ImageExplainMod::processImage(const String& imagePath)
   // GPT-4 Visionに送信して解析
   avatar.setSpeechText("AIに問い合わせ中...");
   
+  // 質問文があればそれを使用、なければデフォルトの質問
+  String question = "";
+  if (g_imageQuestion != "") {
+    question = g_imageQuestion;
+    Serial.println("Using custom question: " + question);
+  } else {
+    question = "この画像について詳しく説明してください。画像に質問や指示が書かれている場合は、それに答えてください。";
+  }
+  
   // Robotクラスのchat関数を使用（画像付き）
   // グローバルバッファを使用することでメモリコピーを避ける
-  robot->chat("この画像について詳しく説明してください。", g_base64ImageBuffer.c_str());
+  robot->chat(question, g_base64ImageBuffer.c_str());
   
   avatar.setExpression(Expression::Neutral);
   
-  // Base64バッファをクリア（メモリ節約）
+  // Base64バッファと質問文をクリア（メモリ節約）
   g_base64ImageBuffer = "";
+  g_imageQuestion = "";
   
   processing = false;
+  conversationMode = true;  // 会話継続モードを有効化
   
   Serial.println("Image processing completed");
-  delay(1000);
-  avatar.setSpeechText("画像を送信してください");
+  Serial.println("=== Conversation mode ENABLED ===");
+  Serial.println("You can now ask follow-up questions");
+  avatar.setSpeechText("追加で質問できます");
+  delay(2000);
+  avatar.setSpeechText("画面をタッチしてください");
 }

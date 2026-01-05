@@ -61,3 +61,10 @@ int LLMBase::search_delimiter(String& text)
 
   return idx;
 }
+
+// 会話履歴をクリア
+void LLMBase::clear_history()
+{
+  chatHistory.clear();
+  Serial.println("Chat history cleared");
+}

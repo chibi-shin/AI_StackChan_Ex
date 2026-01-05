@@ -11,5 +11,6 @@ extern void web_server_handle_client(void);
 extern String g_uploadedImagePath;
 extern bool g_imageUploaded;
 extern String g_base64ImageBuffer;
+extern String g_imageQuestion;  // 画像に対する質問文
 
 #endif  //_WEB_API_H

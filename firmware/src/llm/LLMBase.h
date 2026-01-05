@@ -32,6 +32,7 @@ public:
   virtual bool init_chat_doc(const char *data) {};
   virtual bool save_role() {};
   virtual void load_role() {};
+  void clear_history();  // 会話履歴をクリア
 
   // for async TTS
   //

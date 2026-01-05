@@ -24,7 +24,7 @@ public:  //本当はprivateにしたいところだがコールバック関数�
 public:
     ChatGPT(llm_param_t param, int _promptMaxSize = CHATGPT_PROMPT_MAX_SIZE);
     virtual void chat(String text, const char *base64_buf = NULL);
-    String execChatGpt(String& calledFunc);
+    String execChatGpt(const JsonDocument& doc, String& calledFunc);
     String exec_calledFunc(const char* name, const char* args);
     String https_post_json(const char* url, const JsonDocument& doc, const char* root_ca);
     

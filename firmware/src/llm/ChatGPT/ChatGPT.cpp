@@ -236,18 +236,49 @@ String ChatGPT::https_post_json(const char* url, const JsonDocument& doc, const 
   }
   Serial.printf("[HTTPS] Response code: %d\n", httpCode);
 
-  // ヘッダー読み飛ばし（空行まで）
+  // ヘッダー読み飛ばし（空行まで）、chunked encoding検出
+  bool isChunked = false;
   while (client->connected() || client->available()) {
     String line = client->readStringUntil('\n');
     line.trim();
     if (line.length() == 0) {
       break; // 空行を検出したらヘッダー終了
     }
+    if (line.equalsIgnoreCase("Transfer-Encoding: chunked")) {
+      isChunked = true;
+      Serial.println("[HTTPS] Chunked encoding detected");
+    }
     delay(0);
   }
 
-  // ボディのみ読み取り
-  payload = client->readString();
+  // ボディ読み取り（chunked encodingに対応）
+  if (isChunked) {
+    // chunked encodingをデコード
+    while (client->connected() || client->available()) {
+      String chunkSizeLine = client->readStringUntil('\n');
+      chunkSizeLine.trim();
+      if (chunkSizeLine.length() == 0) continue;
+      
+      // 16進数のチャンクサイズを読み取り
+      int chunkSize = (int)strtol(chunkSizeLine.c_str(), NULL, 16);
+      if (chunkSize == 0) break; // 最終チャンク
+      
+      // チャンクデータを読み取り
+      char* chunk = (char*)malloc(chunkSize + 1);
+      if (chunk) {
+        int bytesRead = client->readBytes(chunk, chunkSize);
+        chunk[bytesRead] = '\0';
+        payload += String(chunk);
+        free(chunk);
+      }
+      
+      // チャンク末尾の \r\n を読み飛ばし
+      client->readStringUntil('\n');
+    }
+  } else {
+    // 通常の読み取り
+    payload = client->readString();
+  }
 
   client->stop();
   delete client;
@@ -256,7 +287,7 @@ String ChatGPT::https_post_json(const char* url, const JsonDocument& doc, const 
 
 
 String json_ChatString = 
-"{\"model\": \"gpt-4o\","
+"{\"model\": \"gpt-4o-mini\","
 "\"messages\": [{\"role\": \"user\", \"content\": \"\"}],"
 "\"functions\": [],"
 "\"function_call\":\"auto\""
@@ -489,21 +520,21 @@ void ChatGPT::chat(String text, const char *base64_buf) {
 
     // 巨大JSONはString化せず、必要な情報だけ表示
     Serial.println("====================");
-      Serial.printf("[ChatGPT] doc.measured=%u, doc.capacity=%u, overflowed=%d\n",
-              (unsigned)measureJson(chat_doc), (unsigned)chat_doc.capacity(), (int)chat_doc.overflowed());
-      // urlフィールドの存在確認（nullならここで確定）
-      const char* url = chat_doc["messages"][1]["content"][1]["image_url"]["url"];
-      if (!url) {
-          Serial.println("[ChatGPT] image_url.url is NULL in document");
-        } else {
-          Serial.printf("[ChatGPT] image_url.url len=%u\n", (unsigned)strlen(url));
-          if (strncmp(url, "data:image/", 11) != 0) {
-            Serial.println("[ChatGPT] WARNING: image_url.url does not start with data:image/");
-          }
-      }
-      Serial.println("====================");
+    Serial.printf("[ChatGPT] doc.measured=%u, doc.capacity=%u, overflowed=%d\n",
+            (unsigned)measureJson(chat_doc), (unsigned)chat_doc.capacity(), (int)chat_doc.overflowed());
+    // urlフィールドの存在確認（nullならここで確定）
+    const char* url = chat_doc["messages"][1]["content"][1]["image_url"]["url"];
+    if (!url) {
+        Serial.println("[ChatGPT] image_url.url is NULL in document");
+      } else {
+        Serial.printf("[ChatGPT] image_url.url len=%u\n", (unsigned)strlen(url));
+        if (strncmp(url, "data:image/", 11) != 0) {
+          Serial.println("[ChatGPT] WARNING: image_url.url does not start with data:image/");
+        }
+    }
+    Serial.println("====================");
 
-      response = execChatGpt(calledFunc);
+    response = execChatGpt(chat_doc, calledFunc);
 
 
     if(calledFunc == ""){   // Function Callなし ／ Function Call繰り返しの完了
@@ -522,18 +553,18 @@ void ChatGPT::chat(String text, const char *base64_buf) {
 }
 
 
-String ChatGPT::execChatGpt(String& calledFunc) {
+String ChatGPT::execChatGpt(const JsonDocument& doc, String& calledFunc) {
   String response = "";
   avatar.setExpression(Expression::Doubt);
   avatar.setSpeechFont(&fonts::efontJA_16);
   avatar.setSpeechText("考え中…");
-  String ret = https_post_json("https://api.openai.com/v1/chat/completions", chat_doc, root_ca_openai);
+  String ret = https_post_json("https://api.openai.com/v1/chat/completions", doc, root_ca_openai);
   avatar.setExpression(Expression::Neutral);
   avatar.setSpeechText("");
   Serial.println(ret);
   if(ret != ""){
-    DynamicJsonDocument doc(2000);
-    DeserializationError error = deserializeJson(doc, ret.c_str());
+    DynamicJsonDocument retDoc(50 * 1024);  // GPT-4oの長い応答に対応
+    DeserializationError error = deserializeJson(retDoc, ret.c_str());
     if (error) {
       Serial.print(F("deserializeJson() failed: "));
       Serial.println(error.f_str());
@@ -545,7 +576,7 @@ String ChatGPT::execChatGpt(String& calledFunc) {
       avatar.setExpression(Expression::Neutral);
     }else{
       // OpenAI errorレスポンス
-      const char* errMsg = doc["error"]["message"]; 
+      const char* errMsg = retDoc["error"]["message"]; 
       if (errMsg && errMsg[0] != '\0') {
         Serial.println(errMsg);
         avatar.setExpression(Expression::Sad);
@@ -558,12 +589,12 @@ String ChatGPT::execChatGpt(String& calledFunc) {
         return response;
       }
 
-      const char* data = doc["choices"][0]["message"]["content"];
+      const char* data = retDoc["choices"][0]["message"]["content"];
       
       // content = nullならfunction call
       if(data == 0){
-        const char* name = doc["choices"][0]["message"]["function_call"]["name"];
-        const char* args = doc["choices"][0]["message"]["function_call"]["arguments"];
+        const char* name = retDoc["choices"][0]["message"]["function_call"]["name"];
+        const char* args = retDoc["choices"][0]["message"]["function_call"]["arguments"];
 
         //avatar.setSpeechFont(&fonts::efontJA_12);
         //avatar.setSpeechText(name);
