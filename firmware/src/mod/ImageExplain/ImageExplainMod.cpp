@@ -241,8 +241,11 @@ void ImageExplainMod::processImage(const String& imagePath)
     question = g_imageQuestion;
     Serial.println("Using custom question: " + question);
   } else {
-    question = "この画像について詳しく説明してください。画像に質問や指示が書かれている場合は、それに答えてください。";
+    question = "この画像について感想を述べてください。";
   }
+  
+  Serial.printf("[ImageExplain] Question: %s\n", question.c_str());
+  Serial.printf("[ImageExplain] Base64 length: %d\n", g_base64ImageBuffer.length());
   
   // Robotクラスのchat関数を使用（画像付き）
   // グローバルバッファを使用することでメモリコピーを避ける

@@ -1,4 +1,5 @@
 #include "Robot.h"
+#include <SD.h>
 #include "tts/WebVoiceVoxTTS.h"
 #include "tts/ElevenLabsTTS.h"
 #include "tts/OpenAITTS.h"
@@ -269,4 +270,96 @@ String Robot::listen()
 void Robot::chat(String text, const char *base64_buf)
 {
   llm->chat(text, base64_buf);
+}
+
+// 待機中音声キャッシュ機能
+//
+void Robot::initIdlePhraseCache()
+{
+  idle_phrases_s idle_phrases = m_config.getExConfig().idle_phrases;
+  
+  if(idle_phrases.count == 0){
+    Serial.println("[IdlePhrase] No phrases configured");
+    return;
+  }
+
+  Serial.printf("[IdlePhrase] Initializing cache for %d phrases\n", idle_phrases.count);
+  
+  // キャッシュディレクトリ作成
+  if(!SD.exists("/cache")){
+    SD.mkdir("/cache");
+  }
+
+  // 各フレーズをTTSで生成してキャッシュ
+  for(int i=0; i<idle_phrases.count; i++){
+    String cache_path = "/cache/idle_" + String(i) + ".mp3";
+    
+    // キャッシュが既に存在する場合はスキップ
+    if(SD.exists(cache_path)){
+      Serial.printf("[IdlePhrase] Cache exists: %s\n", cache_path.c_str());
+      continue;
+    }
+
+    Serial.printf("[IdlePhrase] Generating: %s -> %s\n", 
+                  idle_phrases.phrases[i].c_str(), cache_path.c_str());
+    
+    // TTSでMP3生成してSDに保存
+    bool success = tts->save_to_file(idle_phrases.phrases[i], cache_path);
+    
+    if(success){
+      Serial.printf("[IdlePhrase] Saved: %s\n", cache_path.c_str());
+    } else {
+      Serial.printf("[IdlePhrase] Failed to save: %s\n", cache_path.c_str());
+    }
+    
+    delay(100);
+  }
+  
+  Serial.println("[IdlePhrase] Cache initialization completed");
+}
+
+void Robot::playRandomIdlePhrase()
+{
+  idle_phrases_s idle_phrases = m_config.getExConfig().idle_phrases;
+  
+  if(idle_phrases.count == 0){
+    return;
+  }
+
+  // ランダムにフレーズを選択
+  int idx = random(idle_phrases.count);
+  String cache_path = "/cache/idle_" + String(idx) + ".mp3";
+  
+  // キャッシュファイルが存在するか確認
+  if(!SD.exists(cache_path)){
+    Serial.printf("[IdlePhrase] Cache not found: %s\n", cache_path.c_str());
+    // キャッシュがない場合は直接TTSで再生
+    speech(idle_phrases.phrases[idx]);
+    return;
+  }
+
+  // キャッシュから再生
+  Serial.printf("[IdlePhrase] Playing: %s (%s)\n", 
+                idle_phrases.phrases[idx].c_str(), cache_path.c_str());
+  
+  tts->play_from_file(cache_path);
+}
+
+bool Robot::idlePhraseCacheExists()
+{
+  idle_phrases_s idle_phrases = m_config.getExConfig().idle_phrases;
+  
+  if(idle_phrases.count == 0){
+    return false;
+  }
+
+  // すべてのキャッシュが存在するか確認
+  for(int i=0; i<idle_phrases.count; i++){
+    String cache_path = "/cache/idle_" + String(i) + ".mp3";
+    if(!SD.exists(cache_path)){
+      return false;
+    }
+  }
+  
+  return true;
 }

@@ -1,6 +1,9 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <SD.h>
+#include <AudioFileSourceSD.h>
+#include <AudioFileSourceBuffer.h>
 #include "rootCA/WebVoiceVoxRootCA.h"
 #include "WebVoiceVoxTTS.h"
 #include "SpiRamJsonDocument.h"
@@ -186,4 +189,88 @@ void WebVoiceVoxTTS::stream(String text){
   playMP3(buff);
   delete httpsStream;
   delete buff;
+}
+
+// 待機音声キャッシュ: MP3をSDカードに保存
+bool WebVoiceVoxTTS::save_to_file(String text, String filepath){
+  String URL = getStreamUrl(text);
+  if(URL == ""){
+    Serial.println("[VoiceVox] Failed to get stream URL.");
+    return false;
+  }
+
+  WiFiClientSecure *client = new WiFiClientSecure;
+  if(!client){
+    Serial.println("[VoiceVox] Unable to create client");
+    return false;
+  }
+
+  client->setCACert(root_ca);
+  HTTPClient https;
+  
+  if(https.begin(*client, URL)){
+    int httpCode = https.GET();
+    if(httpCode == HTTP_CODE_OK){
+      File file = SD.open(filepath.c_str(), FILE_WRITE);
+      if(!file){
+        Serial.printf("[VoiceVox] Failed to open file: %s\n", filepath.c_str());
+        https.end();
+        delete client;
+        return false;
+      }
+
+      // ストリームから読み込んでファイルに書き込み
+      WiFiClient * stream = https.getStreamPtr();
+      uint8_t buff[512];
+      int len = https.getSize();
+      int written = 0;
+
+      while(https.connected() && (len > 0 || len == -1)){
+        size_t size = stream->available();
+        if(size){
+          int c = stream->readBytes(buff, ((size > sizeof(buff)) ? sizeof(buff) : size));
+          file.write(buff, c);
+          written += c;
+          if(len > 0){
+            len -= c;
+          }
+        }
+        delay(1);
+      }
+
+      file.close();
+      Serial.printf("[VoiceVox] Saved %d bytes to %s\n", written, filepath.c_str());
+      https.end();
+      delete client;
+      return true;
+    }
+    else{
+      Serial.printf("[VoiceVox] GET failed, error: %s\n", https.errorToString(httpCode).c_str());
+      https.end();
+      delete client;
+      return false;
+    }
+  }
+  else{
+    Serial.println("[VoiceVox] Unable to connect");
+    delete client;
+    return false;
+  }
+}
+
+// 待機音声キャッシュ: SDカードからMP3を再生
+bool WebVoiceVoxTTS::play_from_file(String filepath){
+  if(!SD.exists(filepath.c_str())){
+    Serial.printf("[VoiceVox] File not found: %s\n", filepath.c_str());
+    return false;
+  }
+
+  AudioFileSourceSD *file = new AudioFileSourceSD(filepath.c_str());
+  AudioFileSourceBuffer *buff = new AudioFileSourceBuffer(file, preallocateBuffer, preallocateBufferSize);
+
+  playMP3(buff);
+  
+  delete buff;
+  delete file;
+  return true;
 }

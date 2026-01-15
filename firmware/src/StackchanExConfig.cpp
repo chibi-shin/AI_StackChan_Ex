@@ -177,6 +177,16 @@ void StackchanExConfig::setExtendSettings(DynamicJsonDocument doc)
     _ex_parameters.moduleLLM.rxPin  = doc["moduleLLM"]["rxPin"].as<int>();
     _ex_parameters.moduleLLM.txPin  = doc["moduleLLM"]["txPin"].as<int>();
 
+    // 待機中音声フレーズの読み込み
+    _ex_parameters.idle_phrases.count = 0;
+    if(doc.containsKey("idle_phrases") && doc["idle_phrases"].is<JsonArray>()){
+        JsonArray phrases = doc["idle_phrases"].as<JsonArray>();
+        for(int i=0; i<phrases.size() && i<IDLE_PHRASES_MAX; i++){
+            _ex_parameters.idle_phrases.phrases[i] = phrases[i].as<String>();
+            _ex_parameters.idle_phrases.count++;
+        }
+    }
+
 }
 
 void StackchanExConfig::printExtParameters(void)
@@ -208,5 +218,9 @@ void StackchanExConfig::printExtParameters(void)
     M5_LOGI("mail to addr: %s", _ex_parameters.mail.to_addr.c_str());
     M5_LOGI("weather city id: %s", _ex_parameters.weather.city_id.c_str());
     M5_LOGI("news apikey: %s", _ex_parameters.news.apikey.c_str());
+    M5_LOGI("idle_phrases count: %d", _ex_parameters.idle_phrases.count);
+    for(int i=0; i<_ex_parameters.idle_phrases.count; i++){
+        M5_LOGI("idle_phrases[%d]: %s", i, _ex_parameters.idle_phrases.phrases[i].c_str());
+    }
 
 }

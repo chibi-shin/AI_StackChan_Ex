@@ -202,6 +202,10 @@ static const char DRAW_HTML[] PROGMEM = R"KEWL(
 			<canvas id="drawCanvas" width="800" height="600"></canvas>
 			<canvas id="objectCanvas" width="800" height="600" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;"></canvas>
 		</div>
+		<div style="margin: 20px 0;">
+			<label for="drawQuestionInput" style="display: block; margin-bottom: 10px; font-weight: bold;">💬 質問（オプション）:</label>
+			<textarea id="drawQuestionInput" placeholder="画像について質問がある場合は入力してください（例: この絵は何を表していますか？）" style="width: 100%; height: 80px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box;"></textarea>
+		</div>
 		<div class="action-buttons">
 			<button onclick="sendToAI()">🚀 AIに送信</button>
 			<button onclick="downloadImage()">💾 画像保存</button>
@@ -510,6 +514,13 @@ static const char DRAW_HTML[] PROGMEM = R"KEWL(
 			tmpCanvas.toBlob((blob) => {
 				const formData = new FormData();
 				formData.append('image', blob, 'drawing.png');
+				
+				// 質問文があれば追加
+				const question = document.getElementById('drawQuestionInput').value.trim();
+				if (question) {
+					formData.append('question', question);
+				}
+				
 				fetch('/image_upload', { method: 'POST', body: formData })
 					.then(response => response.text())
 					.then(data => showStatus('送信完了！スタックチャンが説明します', 'success'))
@@ -920,9 +931,13 @@ void handle_image_upload() {
   HTTPUpload& upload = server.upload();
   static File uploadFile;
   static String uploadPath = "/app/AiStackChanEx/uploaded_image.jpg";
+  static String tempQuestion = "";  // 一時的に質問を保存
 
   if (upload.status == UPLOAD_FILE_START) {
     Serial.printf("Upload Start: %s\n", upload.filename.c_str());
+    
+    // アップロード開始時にquestionフィールドを取得（まだ取得できる段階）
+    tempQuestion = "";
     
     // SDカードの初期化確認
     if(!SD.begin(GPIO_NUM_4, SPI, 25000000)) {
@@ -958,11 +973,16 @@ void handle_image_upload() {
       Serial.printf("Upload Complete: %d bytes\n", upload.totalSize);
       
       // 質問文を取得（POSTパラメータから）
+      // multipart/form-dataの場合、この時点でargが利用可能
       if (server.hasArg("question")) {
         g_imageQuestion = server.arg("question");
-        Serial.println("Question: " + g_imageQuestion);
+        Serial.println("Question from arg: " + g_imageQuestion);
+      } else if (tempQuestion != "") {
+        g_imageQuestion = tempQuestion;
+        Serial.println("Question from temp: " + g_imageQuestion);
       } else {
         g_imageQuestion = "";
+        Serial.println("No question provided");
       }
       
       // グローバル変数に画像パスを保存
@@ -981,6 +1001,14 @@ void handle_image_upload() {
     }
     Serial.println("Upload Aborted");
     server.send(500, "text/plain", "Upload Aborted");
+  }
+}
+
+// アップロード完了後のハンドラ（ここでquestionを取得）
+void handle_image_upload_complete() {
+  if (server.hasArg("question")) {
+    g_imageQuestion = server.arg("question");
+    Serial.println("Question in complete handler: " + g_imageQuestion);
   }
 }
 
@@ -1061,7 +1089,7 @@ void init_web_server(void)
   server.on("/role_get", handle_role_get);
   server.on("/image_upload_page", handle_image_upload_page);
   server.on("/draw", handle_draw_page);  // お絵かきページ
-  server.on("/image_upload", HTTP_POST, handle_image_upload, handle_image_upload);
+  server.on("/image_upload", HTTP_POST, handle_image_upload_complete, handle_image_upload);
   server.onNotFound(handleNotFound);
 
   server.begin();

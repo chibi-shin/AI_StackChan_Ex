@@ -41,6 +41,13 @@ typedef struct FnNews {
     String apikey;
 } news_s;
 
+//待機中音声フレーズ
+#define IDLE_PHRASES_MAX 20
+typedef struct IdlePhrases {
+    int count;
+    String phrases[IDLE_PHRASES_MAX];
+} idle_phrases_s;
+
 
 //
 // AI機能設定 
@@ -108,6 +115,7 @@ typedef struct ExConfig {
     mail_s mail;
     weather_s weather;
     news_s news;
+    idle_phrases_s idle_phrases;
 } ex_config_s;
 
 

@@ -379,6 +379,12 @@ void setup()
 
     robot = new Robot(system_config);
 
+    // 待機音声キャッシュの初期化
+    Serial.println("Initializing idle phrase cache...");
+    M5.Lcd.println("Initializing idle phrase cache...");
+    robot->initIdlePhraseCache();
+    Serial.println("Idle phrase cache initialized.");
+
     //SD.end();
   } else {
     M5.Lcd.print("Failed to load SD card settings. System reset after 5 seconds.");

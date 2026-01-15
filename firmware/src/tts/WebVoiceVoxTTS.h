@@ -17,5 +17,7 @@ private:
 public:
     WebVoiceVoxTTS(tts_param_t param) : TTSBase(param) {};
     void stream(String text);
+    bool save_to_file(String text, String filepath) override;
+    bool play_from_file(String filepath) override;
 };
 

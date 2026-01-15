@@ -36,6 +36,11 @@ public:
     String listen();
     void chat(String text, const char *base64_buf = NULL);
 
+    // 待機中音声キャッシュ機能
+    void initIdlePhraseCache();
+    void playRandomIdlePhrase();
+    bool idlePhraseCacheExists();
+
     // TTS非同期版
     //
     bool asyncPlaying;
